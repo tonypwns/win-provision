@@ -88,7 +88,24 @@ function Invoke-CTTWinUtil {
     Write-Host "  Config downloaded to $configPath"
 
     Write-Host "  Running WinUtil with config (unattended)..." -ForegroundColor Yellow
-    iex "& { $(irm christitus.com/win) } -Config `"$configPath`" -Run"
+    Write-Host "  This may take a while — installing apps and applying tweaks..." -ForegroundColor Yellow
+
+    # Download the WinUtil script to a temp file so we can run it in a separate process
+    $winutilScript = "$env:TEMP\winutil.ps1"
+    Invoke-RestMethod -Uri "christitus.com/win" -OutFile $winutilScript
+
+    # Run in a separate process so it doesn't block our script
+    $proc = Start-Process -FilePath "powershell" -ArgumentList @(
+        "-ExecutionPolicy", "Bypass",
+        "-NoProfile",
+        "-File", $winutilScript,
+        "-Config", $configPath,
+        "-Run"
+    ) -Wait -PassThru
+
+    if ($proc.ExitCode -ne 0) {
+        Write-Host "  [WARN] WinUtil exited with code $($proc.ExitCode)" -ForegroundColor Yellow
+    }
 
     # Refresh PATH after installs
     $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
@@ -412,8 +429,18 @@ function Invoke-Provision {
 
     $state = Get-ProvisionState
     Write-Host "`n  State file: $StateFile"
+    Write-Host "  User profile: $env:USERPROFILE" -ForegroundColor DarkGray
     if ($state.last_run) {
         Write-Host "  Last run: $($state.last_run)" -ForegroundColor DarkGray
+    }
+
+    # Test that we can actually write the state file
+    try {
+        Save-ProvisionState -State $state
+        Write-Host "  State file writable: YES" -ForegroundColor DarkGray
+    } catch {
+        Write-Host "  [ERROR] Cannot write state file: $_" -ForegroundColor Red
+        Write-Host "  Provisioning state will not persist!" -ForegroundColor Red
     }
 
     $state = Invoke-CTTWinUtil -State $state

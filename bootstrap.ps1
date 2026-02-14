@@ -24,6 +24,7 @@ function Get-ProvisionState {
     return [PSCustomObject]@{
         ctt_applied        = $false
         starship_configured = $false
+        glazewm_configured = $false
         pwsh_profile       = $false
         ssh_configured     = $false
         git_configured     = $false
@@ -146,6 +147,49 @@ function Install-StarshipConfig {
 
     $State.starship_configured = $true
     Write-Done "Starship config"
+    return $State
+}
+
+# ── Step 2b: GlazeWM & Zebar Config ──────────────────────────────────────────
+
+function Install-GlazeWMConfig {
+    param($State)
+    Write-Step "GlazeWM & Zebar Configuration"
+
+    if ($State.glazewm_configured) {
+        # Hash check for updates
+        $glazeConf = "$env:USERPROFILE\.glzr\glazewm\config.yaml"
+        if (Test-Path $glazeConf) {
+            $current = Get-FileHash $glazeConf -Algorithm SHA256
+            $tempFile = "$env:TEMP\glazewm-check.yaml"
+            try {
+                Get-RepoFile -RepoPath "configs/glazewm/config.yaml" -Destination $tempFile
+                $upstream = Get-FileHash $tempFile -Algorithm SHA256
+                if ($current.Hash -eq $upstream.Hash) {
+                    Write-Skip "GlazeWM & Zebar config (up to date)"
+                    return $State
+                }
+                Write-Host "  Config has changed upstream — updating" -ForegroundColor Yellow
+            } catch {
+                Write-Skip "GlazeWM & Zebar config (couldn't check upstream)"
+                return $State
+            }
+        }
+    }
+
+    # Deploy GlazeWM config
+    $glazeDest = "$env:USERPROFILE\.glzr\glazewm\config.yaml"
+    Get-RepoFile -RepoPath "configs/glazewm/config.yaml" -Destination $glazeDest
+    Write-Host "  Deployed GlazeWM config to $glazeDest"
+
+    # Deploy Zebar configs
+    $zebarDir = "$env:USERPROFILE\.glzr\zebar"
+    Get-RepoFile -RepoPath "configs/zebar/settings.json" -Destination "$zebarDir\settings.json"
+    Get-RepoFile -RepoPath "configs/zebar/normalize.css" -Destination "$zebarDir\normalize.css"
+    Write-Host "  Deployed Zebar configs to $zebarDir"
+
+    $State.glazewm_configured = $true
+    Write-Done "GlazeWM & Zebar config"
     return $State
 }
 
@@ -348,6 +392,9 @@ function Invoke-Provision {
     Save-ProvisionState -State $state
 
     $state = Install-StarshipConfig -State $state
+    Save-ProvisionState -State $state
+
+    $state = Install-GlazeWMConfig -State $state
     Save-ProvisionState -State $state
 
     $state = Install-PwshProfile -State $state

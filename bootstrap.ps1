@@ -1,7 +1,7 @@
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-    Windows provisioning bootstrap — idempotent, re-runnable.
+    Windows provisioning bootstrap — fully touchless, idempotent, re-runnable.
 .DESCRIPTION
     Pulls config from GitHub and provisions a fresh Windows install.
     Tracks state in ~/.provision-state.json to skip completed steps.
@@ -14,6 +14,7 @@ $ErrorActionPreference = "Stop"
 $RepoBase = "https://raw.githubusercontent.com/tonypwns/win-provision/main"
 $StateFile = "$env:USERPROFILE\.provision-state.json"
 $ConfigDir = "$env:USERPROFILE\.config"
+$NeedsReboot = $false
 
 # ── State Management ──────────────────────────────────────────────────────────
 
@@ -22,14 +23,15 @@ function Get-ProvisionState {
         return Get-Content $StateFile -Raw | ConvertFrom-Json
     }
     return [PSCustomObject]@{
-        ctt_applied        = $false
+        ctt_applied         = $false
         starship_configured = $false
-        glazewm_configured = $false
-        pwsh_profile       = $false
-        ssh_configured     = $false
-        git_configured     = $false
-        virtio_installed   = $false
-        last_run           = $null
+        glazewm_configured  = $false
+        pwsh_profile        = $false
+        ssh_configured      = $false
+        git_configured      = $false
+        virtio_installed    = $false
+        terminal_configured = $false
+        last_run            = $null
     }
 }
 
@@ -85,23 +87,13 @@ function Invoke-CTTWinUtil {
     Get-RepoFile -RepoPath "CTT_config.json" -Destination $configPath
     Write-Host "  Config downloaded to $configPath"
 
-    # Verify apps aren't already installed (spot-check a few key ones)
-    $spotCheck = @("starship", "alacritty", "pwsh")
-    $installed = 0
-    foreach ($cmd in $spotCheck) {
-        if (Get-Command $cmd -ErrorAction SilentlyContinue) { $installed++ }
-    }
-
-    if ($installed -ge 2) {
-        Write-Host "  Most apps appear already installed ($installed/3 spot-check passed)" -ForegroundColor Yellow
-        $State.ctt_applied = $true
-        Write-Done "Skipped — apps already present"
-        return $State
-    }
-
     Write-Host "  Running WinUtil with config (unattended)..." -ForegroundColor Yellow
     iex "& { $(irm christitus.com/win) } -Config `"$configPath`" -Run"
 
+    # Refresh PATH after installs
+    $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
+
+    $script:NeedsReboot = $true
     $State.ctt_applied = $true
     Write-Done "CTT WinUtil"
     return $State
@@ -114,7 +106,7 @@ function Install-StarshipConfig {
     Write-Step "Starship Prompt Configuration"
 
     if ($State.starship_configured) {
-        # Check if config has changed upstream
+        # Hash check for updates
         $dest = "$ConfigDir\starship.toml"
         if (Test-Path $dest) {
             $current = Get-FileHash $dest -Algorithm SHA256
@@ -137,8 +129,13 @@ function Install-StarshipConfig {
     }
 
     if (!(Get-Command starship -ErrorAction SilentlyContinue)) {
-        Write-Host "  Starship not installed — install via CTT WinUtil first" -ForegroundColor Red
-        return $State
+        Write-Host "  Starship not in PATH — attempting winget install..." -ForegroundColor Yellow
+        winget install --id Starship.Starship --accept-source-agreements --accept-package-agreements --silent 2>$null
+        $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
+        if (!(Get-Command starship -ErrorAction SilentlyContinue)) {
+            Write-Host "  [WARN] Starship still not found — config deployed, will work after reboot" -ForegroundColor Yellow
+            $script:NeedsReboot = $true
+        }
     }
 
     $dest = "$ConfigDir\starship.toml"
@@ -150,14 +147,13 @@ function Install-StarshipConfig {
     return $State
 }
 
-# ── Step 2b: GlazeWM & Zebar Config ──────────────────────────────────────────
+# ── Step 3: GlazeWM & Zebar Config ──────────────────────────────────────────
 
 function Install-GlazeWMConfig {
     param($State)
     Write-Step "GlazeWM & Zebar Configuration"
 
     if ($State.glazewm_configured) {
-        # Hash check for updates
         $glazeConf = "$env:USERPROFILE\.glzr\glazewm\config.yaml"
         if (Test-Path $glazeConf) {
             $current = Get-FileHash $glazeConf -Algorithm SHA256
@@ -177,23 +173,48 @@ function Install-GlazeWMConfig {
         }
     }
 
-    # Deploy GlazeWM config
     $glazeDest = "$env:USERPROFILE\.glzr\glazewm\config.yaml"
     Get-RepoFile -RepoPath "configs/glazewm/config.yaml" -Destination $glazeDest
-    Write-Host "  Deployed GlazeWM config to $glazeDest"
+    Write-Host "  Deployed GlazeWM config"
 
-    # Deploy Zebar configs
     $zebarDir = "$env:USERPROFILE\.glzr\zebar"
     Get-RepoFile -RepoPath "configs/zebar/settings.json" -Destination "$zebarDir\settings.json"
     Get-RepoFile -RepoPath "configs/zebar/normalize.css" -Destination "$zebarDir\normalize.css"
-    Write-Host "  Deployed Zebar configs to $zebarDir"
+    Write-Host "  Deployed Zebar configs"
 
     $State.glazewm_configured = $true
     Write-Done "GlazeWM & Zebar config"
     return $State
 }
 
-# ── Step 3: PowerShell Profile ───────────────────────────────────────────────
+# ── Step 4: Windows Terminal Config ──────────────────────────────────────────
+
+function Install-TerminalConfig {
+    param($State)
+    Write-Step "Windows Terminal Configuration"
+
+    if ($State.terminal_configured) {
+        Write-Skip "Windows Terminal config"
+        return $State
+    }
+
+    # Find Windows Terminal settings path
+    $wtPath = Get-ChildItem "$env:LOCALAPPDATA\Packages\Microsoft.WindowsTerminal_*\LocalState" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (!$wtPath) {
+        Write-Host "  Windows Terminal not found — skipping" -ForegroundColor Yellow
+        return $State
+    }
+
+    $dest = Join-Path $wtPath.FullName "settings.json"
+    Get-RepoFile -RepoPath "configs/terminal/settings.json" -Destination $dest
+    Write-Host "  Deployed to $dest"
+
+    $State.terminal_configured = $true
+    Write-Done "Windows Terminal config"
+    return $State
+}
+
+# ── Step 5: PowerShell Profile ───────────────────────────────────────────────
 
 function Install-PwshProfile {
     param($State)
@@ -203,9 +224,6 @@ function Install-PwshProfile {
         Write-Skip "PowerShell profile"
         return $State
     }
-
-    # Determine profile path (prefer pwsh 7 over Windows PowerShell)
-    $profilePath = $PROFILE.CurrentUserAllHosts
 
     $profileContent = @'
 # ── Starship Prompt ──
@@ -226,22 +244,31 @@ if (Get-Service ssh-agent -ErrorAction SilentlyContinue | Where-Object Status -e
 }
 '@
 
-    $profileDir = Split-Path $profilePath -Parent
-    if (!(Test-Path $profileDir)) { New-Item -ItemType Directory -Path $profileDir -Force | Out-Null }
+    # Deploy to both Windows PowerShell and PowerShell 7 profiles
+    $profiles = @(
+        $PROFILE.CurrentUserAllHosts
+    )
+    # Also check pwsh 7 profile location
+    $pwsh7Profile = "$env:USERPROFILE\Documents\PowerShell\profile.ps1"
+    $ps5Profile = "$env:USERPROFILE\Documents\WindowsPowerShell\profile.ps1"
+    $profiles = @($pwsh7Profile, $ps5Profile) | Select-Object -Unique
 
-    # Don't clobber existing profile — append if it exists
-    if (Test-Path $profilePath) {
-        $existing = Get-Content $profilePath -Raw
-        if ($existing -match "starship init") {
-            Write-Host "  Profile already contains starship init — skipping" -ForegroundColor Yellow
-            $State.pwsh_profile = $true
-            return $State
+    foreach ($profilePath in $profiles) {
+        $profileDir = Split-Path $profilePath -Parent
+        if (!(Test-Path $profileDir)) { New-Item -ItemType Directory -Path $profileDir -Force | Out-Null }
+
+        if (Test-Path $profilePath) {
+            $existing = Get-Content $profilePath -Raw -ErrorAction SilentlyContinue
+            if ($existing -match "starship init") {
+                Write-Host "  Profile already configured: $profilePath" -ForegroundColor DarkGray
+                continue
+            }
+            Add-Content -Path $profilePath -Value "`n# ── Added by win-provision ──`n$profileContent"
+            Write-Host "  Appended to $profilePath"
+        } else {
+            Set-Content -Path $profilePath -Value $profileContent -Encoding UTF8
+            Write-Host "  Created $profilePath"
         }
-        Write-Host "  Appending to existing profile at $profilePath"
-        Add-Content -Path $profilePath -Value "`n# ── Added by win-provision ──`n$profileContent"
-    } else {
-        Set-Content -Path $profilePath -Value $profileContent -Encoding UTF8
-        Write-Host "  Created profile at $profilePath"
     }
 
     $State.pwsh_profile = $true
@@ -249,7 +276,7 @@ if (Get-Service ssh-agent -ErrorAction SilentlyContinue | Where-Object Status -e
     return $State
 }
 
-# ── Step 4: OpenSSH Server ───────────────────────────────────────────────────
+# ── Step 6: OpenSSH Server ───────────────────────────────────────────────────
 
 function Install-SSHServer {
     param($State)
@@ -260,7 +287,6 @@ function Install-SSHServer {
         return $State
     }
 
-    # Check if already running
     $sshd = Get-Service sshd -ErrorAction SilentlyContinue
     if ($sshd -and $sshd.Status -eq "Running") {
         Write-Host "  sshd already running"
@@ -269,25 +295,22 @@ function Install-SSHServer {
         return $State
     }
 
-    # Install OpenSSH Server capability
     $sshCapability = Get-WindowsCapability -Online | Where-Object Name -like "OpenSSH.Server*"
     if ($sshCapability.State -ne "Installed") {
         Write-Host "  Installing OpenSSH Server..."
         Add-WindowsCapability -Online -Name $sshCapability.Name
+        $script:NeedsReboot = $true
     }
 
-    # Configure and start
     Set-Service -Name sshd -StartupType Automatic
     Start-Service sshd
 
-    # Set PowerShell 7 as default shell (if available)
     $pwshPath = (Get-Command pwsh -ErrorAction SilentlyContinue).Source
     if ($pwshPath) {
         New-ItemProperty -Path "HKLM:\SOFTWARE\OpenSSH" -Name DefaultShell -Value $pwshPath -PropertyType String -Force | Out-Null
         Write-Host "  Default SSH shell set to PowerShell 7"
     }
 
-    # Firewall rule
     $rule = Get-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -ErrorAction SilentlyContinue
     if (!$rule) {
         New-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -DisplayName "OpenSSH Server (sshd)" `
@@ -299,7 +322,7 @@ function Install-SSHServer {
     return $State
 }
 
-# ── Step 5: Git Config ───────────────────────────────────────────────────────
+# ── Step 7: Git Config ───────────────────────────────────────────────────────
 
 function Install-GitConfig {
     param($State)
@@ -311,14 +334,20 @@ function Install-GitConfig {
     }
 
     if (!(Get-Command git -ErrorAction SilentlyContinue)) {
-        Write-Host "  git not found — skipping" -ForegroundColor Yellow
-        return $State
+        Write-Host "  git not in PATH — attempting winget install..." -ForegroundColor Yellow
+        winget install --id Git.Git --accept-source-agreements --accept-package-agreements --silent 2>$null
+        $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
+        if (!(Get-Command git -ErrorAction SilentlyContinue)) {
+            Write-Host "  [WARN] Git still not found — will configure after reboot" -ForegroundColor Yellow
+            $script:NeedsReboot = $true
+            return $State
+        }
     }
 
     $currentName = git config --global user.name 2>$null
     if (!$currentName) {
         git config --global user.name "Anthony Mazzacca"
-        Write-Host "  Git name set. Configure email later: git config --global user.email you@example.com"
+        Write-Host "  Git name set. Set email later: git config --global user.email you@example.com"
     } else {
         Write-Host "  Git already configured as: $currentName"
     }
@@ -331,7 +360,7 @@ function Install-GitConfig {
     return $State
 }
 
-# ── Step 6: VirtIO Guest Tools (VM only) ─────────────────────────────────────
+# ── Step 8: VirtIO Guest Tools (VM only) ─────────────────────────────────────
 
 function Install-VirtIO {
     param($State)
@@ -342,7 +371,6 @@ function Install-VirtIO {
         return $State
     }
 
-    # Detect if running in a QEMU/KVM VM
     $bios = (Get-CimInstance -ClassName Win32_BIOS).Manufacturer
     $system = (Get-CimInstance -ClassName Win32_ComputerSystem).Manufacturer
     $isVM = ($bios -match "QEMU|SeaBIOS|Bochs") -or ($system -match "QEMU")
@@ -353,7 +381,6 @@ function Install-VirtIO {
         return $State
     }
 
-    # Check if guest agent is already running
     $qga = Get-Service QEMU-GA -ErrorAction SilentlyContinue
     if ($qga -and $qga.Status -eq "Running") {
         Write-Host "  QEMU Guest Agent already running"
@@ -368,6 +395,7 @@ function Install-VirtIO {
     Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath
     Start-Process -FilePath $installerPath -ArgumentList "/S" -Wait
 
+    $script:NeedsReboot = $true
     $State.virtio_installed = $true
     Write-Done "VirtIO Guest Tools"
     return $State
@@ -397,6 +425,9 @@ function Invoke-Provision {
     $state = Install-GlazeWMConfig -State $state
     Save-ProvisionState -State $state
 
+    $state = Install-TerminalConfig -State $state
+    Save-ProvisionState -State $state
+
     $state = Install-PwshProfile -State $state
     Save-ProvisionState -State $state
 
@@ -412,12 +443,24 @@ function Invoke-Provision {
     Write-Host ""
     Write-Step "Provisioning Complete"
     Write-Host ""
-    Write-Host "  Next steps:" -ForegroundColor Yellow
-    Write-Host "    1. Install NordPass and log in"
-    Write-Host "    2. Configure terminal (Alacritty/Windows Terminal)"
-    Write-Host "    3. Reboot to apply all changes"
+
+    if ($script:NeedsReboot) {
+        Write-Host "  A reboot is required to finalize changes." -ForegroundColor Yellow
+        Write-Host ""
+        $response = Read-Host "  Reboot now? (Y/n)"
+        if ($response -eq "" -or $response -eq "y" -or $response -eq "Y") {
+            Write-Host "  Rebooting in 5 seconds..." -ForegroundColor Yellow
+            Start-Sleep -Seconds 5
+            Restart-Computer -Force
+        } else {
+            Write-Host "  Skipped reboot. Remember to reboot before using the system." -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "  No reboot needed. System is ready." -ForegroundColor Green
+    }
+
     Write-Host ""
-    Write-Host "  Re-run anytime to pick up changes:" -ForegroundColor DarkGray
+    Write-Host "  Re-run anytime to pick up config changes:" -ForegroundColor DarkGray
     Write-Host "  irm https://raw.githubusercontent.com/tonypwns/win-provision/main/bootstrap.ps1 | iex" -ForegroundColor DarkGray
     Write-Host ""
 }

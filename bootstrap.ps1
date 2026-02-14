@@ -93,23 +93,13 @@ function Invoke-CTTWinUtil {
 
     if ($installed -ge 2) {
         Write-Host "  Most apps appear already installed ($installed/3 spot-check passed)" -ForegroundColor Yellow
-        $response = Read-Host "  Run CTT WinUtil anyway? (y/N)"
-        if ($response -ne "y") {
-            $State.ctt_applied = $true
-            Write-Done "Skipped by user — marked complete"
-            return $State
-        }
+        $State.ctt_applied = $true
+        Write-Done "Skipped — apps already present"
+        return $State
     }
 
-    Write-Host "  Launching WinUtil with config..." -ForegroundColor Yellow
-    Write-Host "  >> Import the config, run Install, Tweaks, and Features tabs manually" -ForegroundColor Yellow
-    Write-Host "  >> Config path: $configPath" -ForegroundColor Yellow
-
-    # WinUtil needs interactive use for the GUI tabs
-    # Launch it and wait for user to finish
-    $wtProcess = Start-Process powershell -ArgumentList "-Command", "irm christitus.com/win | iex" -PassThru
-    Write-Host "  WinUtil launched (PID: $($wtProcess.Id)). Complete all tabs, then close it."
-    Read-Host "  Press Enter when WinUtil is finished"
+    Write-Host "  Running WinUtil with config (unattended)..." -ForegroundColor Yellow
+    iex "& { $(irm christitus.com/win) } -Config `"$configPath`" -Run"
 
     $State.ctt_applied = $true
     Write-Done "CTT WinUtil"
@@ -284,7 +274,7 @@ function Install-GitConfig {
     $currentName = git config --global user.name 2>$null
     if (!$currentName) {
         git config --global user.name "Anthony Mazzacca"
-        git config --global user.email (Read-Host "  Git email")
+        Write-Host "  Git name set. Configure email later: git config --global user.email you@example.com"
     } else {
         Write-Host "  Git already configured as: $currentName"
     }

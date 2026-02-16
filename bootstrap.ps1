@@ -87,27 +87,94 @@ function Invoke-CTTWinUtil {
     Get-RepoFile -RepoPath "CTT_config.json" -Destination $configPath
     Write-Host "  Config downloaded to $configPath"
 
-    Write-Host "  Running WinUtil with config (unattended)..." -ForegroundColor Yellow
-    Write-Host "  This may take a while — installing apps and applying tweaks..." -ForegroundColor Yellow
+    Write-Host "  Launching WinUtil with config (unattended)..." -ForegroundColor Yellow
+    Write-Host "  This may take 10-30 min — installing apps and applying tweaks..." -ForegroundColor Yellow
+    Write-Host "  WinUtil will be closed automatically when done." -ForegroundColor Yellow
 
-    # Download the WinUtil script to a temp file so we can run it in a separate process
-    $winutilScript = "$env:TEMP\winutil.ps1"
-    Invoke-RestMethod -Uri "christitus.com/win" -OutFile $winutilScript
-
-    # Run in a separate process so it doesn't block our script
-    $proc = Start-Process -FilePath "powershell" -ArgumentList @(
+    # Launch WinUtil in a background process using the official automation syntax.
+    # WinUtil is a WPF GUI app — even with -Config -Run, it stays open after
+    # completing tasks. We launch it async, then poll for completion and kill it.
+    $powershellExe = if (Get-Command pwsh -ErrorAction SilentlyContinue) { "pwsh" } else { "powershell" }
+    $cttCommand = "& ([ScriptBlock]::Create((irm 'https://christitus.com/win'))) -Config '$configPath' -Run"
+    $proc = Start-Process -FilePath $powershellExe -ArgumentList @(
         "-ExecutionPolicy", "Bypass",
         "-NoProfile",
-        "-File", $winutilScript,
-        "-Config", $configPath,
-        "-Run"
-    ) -Wait -PassThru
+        "-Command", $cttCommand
+    ) -PassThru
 
-    if ($proc.ExitCode -ne 0) {
-        Write-Host "  [WARN] WinUtil exited with code $($proc.ExitCode)" -ForegroundColor Yellow
+    Write-Host "  WinUtil PID: $($proc.Id)" -ForegroundColor DarkGray
+
+    # Poll for completion by watching the WinUtil log directory.
+    # WinUtil writes logs to $env:LOCALAPPDATA\winutil\logs\winutil_*.log
+    # When tasks finish, the log contains "Tweaks finished" / install completions.
+    # We also watch for the GUI to go idle (MainWindowTitle changes, process becomes responsive).
+    $logDir = "$env:LOCALAPPDATA\winutil\logs"
+    $startTime = Get-Date
+    $maxWaitMinutes = 60
+    $lastStatus = ""
+
+    while (!$proc.HasExited) {
+        Start-Sleep -Seconds 15
+
+        $elapsed = (Get-Date) - $startTime
+        if ($elapsed.TotalMinutes -gt $maxWaitMinutes) {
+            Write-Host "  [WARN] WinUtil exceeded ${maxWaitMinutes}m timeout — killing" -ForegroundColor Yellow
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            break
+        }
+
+        # Check the latest log file for completion signals
+        $logFile = Get-ChildItem "$logDir\winutil_*.log" -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+
+        if ($logFile) {
+            $logContent = Get-Content $logFile.FullName -Raw -ErrorAction SilentlyContinue
+            if ($logContent) {
+                # WinUtil logs these when all tasks are done
+                $tweaksDone = $logContent -match "(?i)(Tweaks finished|Tweaks have been applied)"
+                $installsDone = $logContent -match "(?i)(Install Done|Applications installed)"
+
+                # Show progress
+                $status = ""
+                if ($logContent -match "(?i)installing.*?\.\.\.") { $status = "Installing apps..." }
+                if ($logContent -match "(?i)applying tweaks") { $status = "Applying tweaks..." }
+                if ($tweaksDone) { $status = "Tweaks complete." }
+                if ($installsDone) { $status = "Installs complete." }
+
+                if ($status -and $status -ne $lastStatus) {
+                    Write-Host "  [$([math]::Floor($elapsed.TotalMinutes))m] $status" -ForegroundColor DarkGray
+                    $lastStatus = $status
+                }
+
+                # If both installs and tweaks are done, give it a moment then close
+                if ($tweaksDone -and $installsDone) {
+                    Write-Host "  All WinUtil tasks completed — closing WinUtil..." -ForegroundColor Green
+                    Start-Sleep -Seconds 5
+                    Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+                    break
+                }
+            }
+        }
+
+        # Fallback: if the log hasn't been written to in 3+ minutes AND we've been
+        # running for at least 5 minutes, assume it's done (tasks completed, GUI idle)
+        if ($logFile -and $elapsed.TotalMinutes -gt 5) {
+            $logAge = (Get-Date) - $logFile.LastWriteTime
+            if ($logAge.TotalMinutes -gt 3) {
+                Write-Host "  WinUtil log inactive for 3+ min — assuming tasks complete, closing..." -ForegroundColor Yellow
+                Start-Sleep -Seconds 3
+                Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+                break
+            }
+        }
     }
 
-    # Refresh PATH after installs
+    # Wait for process to fully exit
+    if (!$proc.HasExited) {
+        $proc.WaitForExit(10000) | Out-Null
+    }
+
+    # Refresh PATH after installs (CTT runs in a child process with its own env)
     $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
 
     $script:NeedsReboot = $true
@@ -117,6 +184,41 @@ function Invoke-CTTWinUtil {
 }
 
 # ── Step 2: Starship Config ──────────────────────────────────────────────────
+
+function Find-Starship {
+    # Try Get-Command first (works if already in PATH)
+    $cmd = Get-Command starship -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+
+    # Refresh PATH from registry (CTT installs happen in a child process)
+    $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
+    $cmd = Get-Command starship -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+
+    # Check common install locations directly
+    $candidates = @(
+        "$env:ProgramFiles\starship\bin\starship.exe",
+        "${env:ProgramFiles(x86)}\starship\bin\starship.exe",
+        "$env:LOCALAPPDATA\Programs\starship\bin\starship.exe",
+        "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\Starship.Starship_*\starship.exe",
+        "$env:USERPROFILE\.cargo\bin\starship.exe",
+        "C:\Program Files\starship\bin\starship.exe"
+    )
+    foreach ($pattern in $candidates) {
+        $found = Get-Item $pattern -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($found) {
+            # Add its directory to PATH for the rest of this session
+            $binDir = Split-Path $found.FullName -Parent
+            if ($env:Path -notlike "*$binDir*") {
+                $env:Path = "$binDir;$env:Path"
+                Write-Host "  Added $binDir to session PATH" -ForegroundColor DarkGray
+            }
+            return $found.FullName
+        }
+    }
+
+    return $null
+}
 
 function Install-StarshipConfig {
     param($State)
@@ -145,19 +247,59 @@ function Install-StarshipConfig {
         }
     }
 
-    if (!(Get-Command starship -ErrorAction SilentlyContinue)) {
-        Write-Host "  Starship not in PATH — attempting winget install..." -ForegroundColor Yellow
-        winget install --id Starship.Starship --accept-source-agreements --accept-package-agreements --silent 2>$null
-        $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
-        if (!(Get-Command starship -ErrorAction SilentlyContinue)) {
-            Write-Host "  [WARN] Starship still not found — config deployed, will work after reboot" -ForegroundColor Yellow
+    # Try to find starship (may have been installed by CTT)
+    $starshipPath = Find-Starship
+    if ($starshipPath) {
+        Write-Host "  Found starship at: $starshipPath" -ForegroundColor DarkGray
+    } else {
+        Write-Host "  Starship not found — installing via winget..." -ForegroundColor Yellow
+        try {
+            $wingetOutput = & winget install --id Starship.Starship --accept-source-agreements --accept-package-agreements --silent 2>&1
+            Write-Host "  winget output: $($wingetOutput | Out-String)" -ForegroundColor DarkGray
+        } catch {
+            Write-Host "  [WARN] winget install failed: $_" -ForegroundColor Yellow
+        }
+
+        # Refresh PATH and search again
+        $starshipPath = Find-Starship
+        if (!$starshipPath) {
+            # Last resort: direct MSI/installer download
+            Write-Host "  winget didn't work — trying direct installer..." -ForegroundColor Yellow
+            try {
+                $installerUrl = "https://github.com/starship/starship/releases/latest/download/starship-x86_64-pc-windows-msvc.msi"
+                $installerPath = "$env:TEMP\starship-installer.msi"
+                Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath -UseBasicParsing
+                Start-Process msiexec.exe -ArgumentList "/i `"$installerPath`" /qn" -Wait
+                Remove-Item $installerPath -ErrorAction SilentlyContinue
+                $starshipPath = Find-Starship
+            } catch {
+                Write-Host "  [WARN] Direct installer also failed: $_" -ForegroundColor Yellow
+            }
+        }
+
+        if ($starshipPath) {
+            Write-Host "  Starship installed: $starshipPath" -ForegroundColor Green
+        } else {
+            Write-Host "  [WARN] Could not install starship — config will be deployed, will work after manual install or reboot" -ForegroundColor Yellow
             $script:NeedsReboot = $true
         }
     }
 
+    # Deploy config regardless — even if starship binary isn't found yet,
+    # the config will be ready when it is
     $dest = "$ConfigDir\starship.toml"
     Get-RepoFile -RepoPath "configs/starship/starship.toml" -Destination $dest
-    Write-Host "  Deployed to $dest"
+    Write-Host "  Deployed config to $dest"
+
+    # Verify starship works if we found it
+    if ($starshipPath) {
+        try {
+            $version = & $starshipPath --version 2>&1
+            Write-Host "  Starship version: $version" -ForegroundColor DarkGray
+        } catch {
+            Write-Host "  [WARN] Starship binary found but failed to run: $_" -ForegroundColor Yellow
+        }
+    }
 
     $State.starship_configured = $true
     Write-Done "Starship config"
@@ -350,14 +492,34 @@ function Install-GitConfig {
         return $State
     }
 
+    # Refresh PATH first (git may have been installed by CTT in child process)
+    $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
+
     if (!(Get-Command git -ErrorAction SilentlyContinue)) {
-        Write-Host "  git not in PATH — attempting winget install..." -ForegroundColor Yellow
-        winget install --id Git.Git --accept-source-agreements --accept-package-agreements --silent 2>$null
-        $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
-        if (!(Get-Command git -ErrorAction SilentlyContinue)) {
-            Write-Host "  [WARN] Git still not found — will configure after reboot" -ForegroundColor Yellow
-            $script:NeedsReboot = $true
-            return $State
+        # Check common git install locations
+        $gitPaths = @(
+            "C:\Program Files\Git\cmd\git.exe",
+            "C:\Program Files (x86)\Git\cmd\git.exe",
+            "$env:LOCALAPPDATA\Programs\Git\cmd\git.exe"
+        )
+        $gitFound = $gitPaths | Where-Object { Test-Path $_ } | Select-Object -First 1
+        if ($gitFound) {
+            $gitDir = Split-Path $gitFound -Parent
+            $env:Path = "$gitDir;$env:Path"
+            Write-Host "  Found git at $gitFound — added to session PATH" -ForegroundColor DarkGray
+        } else {
+            Write-Host "  git not found — installing via winget..." -ForegroundColor Yellow
+            try {
+                & winget install --id Git.Git --accept-source-agreements --accept-package-agreements --silent 2>&1 | Out-Null
+            } catch {
+                Write-Host "  [WARN] winget install failed: $_" -ForegroundColor Yellow
+            }
+            $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
+            if (!(Get-Command git -ErrorAction SilentlyContinue)) {
+                Write-Host "  [WARN] Git still not found — will configure after reboot" -ForegroundColor Yellow
+                $script:NeedsReboot = $true
+                return $State
+            }
         }
     }
 

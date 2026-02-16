@@ -105,87 +105,126 @@ function Invoke-CTTWinUtil {
     Write-Host "  This may take 10-30 min — installing apps and applying tweaks..." -ForegroundColor Yellow
     Write-Host "  WinUtil will be closed automatically when done." -ForegroundColor Yellow
 
-    # Launch WinUtil in a background process using the official automation syntax.
-    # WinUtil is a WPF GUI app — even with -Config -Run, it stays open after
-    # completing tasks. We launch it async, then poll for completion and kill it.
+    # Note which log files exist BEFORE launching WinUtil so we can find the new one
+    $logDir = "$env:LOCALAPPDATA\winutil\logs"
+    $existingLogs = @()
+    if (Test-Path $logDir) {
+        $existingLogs = @(Get-ChildItem "$logDir\winutil_*.log" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+    }
+
+    # Launch WinUtil in a background job. We use a job instead of Start-Process
+    # because WinUtil's launcher can exit immediately after spawning the real
+    # GUI process, losing our handle. The job keeps the PowerShell host alive.
     $powershellExe = if (Get-Command pwsh -ErrorAction SilentlyContinue) { "pwsh" } else { "powershell" }
     $cttCommand = "& ([ScriptBlock]::Create((irm 'https://christitus.com/win'))) -Config '$configPath' -Run"
-    $proc = Start-Process -FilePath $powershellExe -ArgumentList @(
+    Start-Process -FilePath $powershellExe -ArgumentList @(
         "-ExecutionPolicy", "Bypass",
         "-NoProfile",
         "-Command", $cttCommand
-    ) -PassThru
+    )
 
-    Write-Host "  WinUtil PID: $($proc.Id)" -ForegroundColor DarkGray
+    # Give WinUtil a moment to start up and create its log file
+    Write-Host "  Waiting for WinUtil to initialize..." -ForegroundColor DarkGray
+    Start-Sleep -Seconds 10
 
-    # Poll for completion by watching the WinUtil log directory.
-    # WinUtil writes logs to $env:LOCALAPPDATA\winutil\logs\winutil_*.log
-    # When tasks finish, the log contains "Tweaks finished" / install completions.
-    # We also watch for the GUI to go idle (MainWindowTitle changes, process becomes responsive).
-    $logDir = "$env:LOCALAPPDATA\winutil\logs"
+    # Poll the log file for completion signals.
+    # WinUtil writes to $LOCALAPPDATA\winutil\logs\winutil_*.log
+    # We watch for "Tweaks finished"/"Tweaks have been applied" and install completions.
+    # When done, we find and kill the WinUtil process by window title.
     $startTime = Get-Date
     $maxWaitMinutes = 60
     $lastStatus = ""
+    $tweaksDone = $false
+    $installsDone = $false
 
-    while (!$proc.HasExited) {
-        Start-Sleep -Seconds 15
+    while ($true) {
+        Start-Sleep -Seconds 10
 
         $elapsed = (Get-Date) - $startTime
         if ($elapsed.TotalMinutes -gt $maxWaitMinutes) {
-            Write-Host "  [WARN] WinUtil exceeded ${maxWaitMinutes}m timeout — killing" -ForegroundColor Yellow
-            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            Write-Host "  [WARN] WinUtil exceeded ${maxWaitMinutes}m timeout" -ForegroundColor Yellow
             break
         }
 
-        # Check the latest log file for completion signals
-        $logFile = Get-ChildItem "$logDir\winutil_*.log" -ErrorAction SilentlyContinue |
-            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        # Find the NEW log file (created after we launched WinUtil)
+        $logFile = $null
+        if (Test-Path $logDir) {
+            $logFile = Get-ChildItem "$logDir\winutil_*.log" -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName -notin $existingLogs } |
+                Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        }
 
-        if ($logFile) {
-            $logContent = Get-Content $logFile.FullName -Raw -ErrorAction SilentlyContinue
-            if ($logContent) {
-                # WinUtil logs these when all tasks are done
-                $tweaksDone = $logContent -match "(?i)(Tweaks finished|Tweaks have been applied)"
-                $installsDone = $logContent -match "(?i)(Install Done|Applications installed)"
-
-                # Show progress
-                $status = ""
-                if ($logContent -match "(?i)installing.*?\.\.\.") { $status = "Installing apps..." }
-                if ($logContent -match "(?i)applying tweaks") { $status = "Applying tweaks..." }
-                if ($tweaksDone) { $status = "Tweaks complete." }
-                if ($installsDone) { $status = "Installs complete." }
-
-                if ($status -and $status -ne $lastStatus) {
-                    Write-Host "  [$([math]::Floor($elapsed.TotalMinutes))m] $status" -ForegroundColor DarkGray
-                    $lastStatus = $status
+        if (!$logFile) {
+            # Check if WinUtil process is even running
+            $winutilProc = Get-Process | Where-Object { $_.MainWindowTitle -match "WinUtil" } | Select-Object -First 1
+            if (!$winutilProc) {
+                # Also check for powershell processes that might be WinUtil
+                $psProcs = Get-Process -Name powershell, pwsh -ErrorAction SilentlyContinue |
+                    Where-Object { $_.MainWindowTitle -match "WinUtil" }
+                if (!$psProcs) {
+                    $minutesIn = [math]::Floor($elapsed.TotalMinutes)
+                    if ($minutesIn -gt 2) {
+                        Write-Host "  [WARN] No WinUtil process found and no log file — it may have closed" -ForegroundColor Yellow
+                        break
+                    }
                 }
+            }
+            Write-Host "  [$([math]::Floor($elapsed.TotalMinutes))m] Waiting for WinUtil log..." -ForegroundColor DarkGray
+            continue
+        }
 
-                # If both installs and tweaks are done, give it a moment then close
-                if ($tweaksDone -and $installsDone) {
-                    Write-Host "  All WinUtil tasks completed — closing WinUtil..." -ForegroundColor Green
-                    Start-Sleep -Seconds 5
-                    Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-                    break
-                }
+        $logContent = Get-Content $logFile.FullName -Raw -ErrorAction SilentlyContinue
+        if (!$logContent) { continue }
+
+        # Check for completion signals
+        if ($logContent -match "(?i)(Tweaks finished|Tweaks have been applied|tweaks are finished)") {
+            if (!$tweaksDone) {
+                Write-Host "  [$([math]::Floor($elapsed.TotalMinutes))m] Tweaks complete." -ForegroundColor Green
+                $tweaksDone = $true
+            }
+        }
+        if ($logContent -match "(?i)(Install Done|Applications installed|install is finished)") {
+            if (!$installsDone) {
+                Write-Host "  [$([math]::Floor($elapsed.TotalMinutes))m] Installs complete." -ForegroundColor Green
+                $installsDone = $true
             }
         }
 
-        # Fallback: if the log hasn't been written to in 3+ minutes AND we've been
-        # running for at least 5 minutes, assume it's done (tasks completed, GUI idle)
-        if ($logFile -and $elapsed.TotalMinutes -gt 5) {
-            $logAge = (Get-Date) - $logFile.LastWriteTime
-            if ($logAge.TotalMinutes -gt 3) {
-                Write-Host "  WinUtil log inactive for 3+ min — assuming tasks complete, closing..." -ForegroundColor Yellow
-                Start-Sleep -Seconds 3
-                Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-                break
-            }
+        # Show progress (only if status changed)
+        $status = ""
+        if ($logContent -match "(?i)(installing\s)") { $status = "Installing apps..." }
+        if ($logContent -match "(?i)(applying tweaks|tweak being)") { $status = "Applying tweaks..." }
+        if ($tweaksDone -and !$installsDone) { $status = "Tweaks done, waiting for installs..." }
+        if ($installsDone -and !$tweaksDone) { $status = "Installs done, waiting for tweaks..." }
+
+        if ($status -and $status -ne $lastStatus) {
+            Write-Host "  [$([math]::Floor($elapsed.TotalMinutes))m] $status" -ForegroundColor DarkGray
+            $lastStatus = $status
+        }
+
+        # Both done — kill WinUtil
+        if ($tweaksDone -and $installsDone) {
+            Write-Host "  All WinUtil tasks completed — closing WinUtil..." -ForegroundColor Green
+            Start-Sleep -Seconds 5
+            break
+        }
+
+        # Fallback: if log hasn't been written to in 5+ min and we've been running 10+ min
+        $logAge = (Get-Date) - $logFile.LastWriteTime
+        if ($elapsed.TotalMinutes -gt 10 -and $logAge.TotalMinutes -gt 5) {
+            Write-Host "  WinUtil log inactive for 5+ min — assuming tasks complete" -ForegroundColor Yellow
+            break
         }
     }
 
-    # Wait for process to fully exit
-    if (!$proc.HasExited) {
-        $proc.WaitForExit(10000) | Out-Null
+    # Kill any WinUtil processes
+    $winutilProcs = Get-Process | Where-Object {
+        $_.MainWindowTitle -match "WinUtil" -or
+        ($_.Name -match "powershell|pwsh" -and $_.MainWindowTitle -match "WinUtil")
+    }
+    foreach ($p in $winutilProcs) {
+        Write-Host "  Closing WinUtil process $($p.Id)..." -ForegroundColor DarkGray
+        Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
     }
 
     # Refresh PATH after installs (CTT runs in a child process with its own env)

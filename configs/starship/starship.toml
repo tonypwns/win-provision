@@ -37,8 +37,8 @@ format = "[$symbol]($style)"
 style = "cyan"
 
 [os.symbols]
-Windows = ""
-Arch = ""
+Windows = ""
+Arch = ""
 
 [username]
 disabled = false

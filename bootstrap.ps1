@@ -134,8 +134,6 @@ function Invoke-CTTWinUtil {
     $startTime = Get-Date
     $maxWaitMinutes = 60
     $lastStatus = ""
-    $tweaksDone = $false
-    $installsDone = $false
 
     while ($true) {
         Start-Sleep -Seconds 10
@@ -187,44 +185,26 @@ function Invoke-CTTWinUtil {
         $logContent = Get-Content $logFile.FullName -Raw -ErrorAction SilentlyContinue
         if (!$logContent) { continue }
 
-        # Debug: dump unique-ish log lines on first read to help identify completion strings
-        if (!$lastStatus) {
-            $logLines = ($logContent -split "`n") | Where-Object { $_.Trim() } | Select-Object -Last 5
-            foreach ($line in $logLines) {
-                Write-Host "  [log] $($line.Trim())" -ForegroundColor DarkGray
-            }
-        }
-
-        # Check for completion signals — broad matching to catch variations
-        if ($logContent -match "(?i)(tweak.*(finished|complete|applied|done))") {
-            if (!$tweaksDone) {
-                Write-Host "  [${minutesIn}m] Tweaks complete." -ForegroundColor Green
-                $tweaksDone = $true
-            }
-        }
-        if ($logContent -match "(?i)(install.*(finished|complete|done)|all.*install)") {
-            if (!$installsDone) {
-                Write-Host "  [${minutesIn}m] Installs complete." -ForegroundColor Green
-                $installsDone = $true
-            }
-        }
+        # Check for completion — WinUtil logs "Done." as a single final line
+        # Progress lines are: "Applying tweaks...", "Installing features...",
+        # "Installing applications...", then "Done."
+        $allDone = $logContent -match "(?m)^Done\.\s*$"
 
         # Show progress (only if status changed)
         $status = ""
-        if ($logContent -match "(?i)(installing\s)") { $status = "Installing apps..." }
-        if ($logContent -match "(?i)(applying tweaks|tweak being|running tweaks)") { $status = "Applying tweaks..." }
-        if ($tweaksDone -and !$installsDone) { $status = "Tweaks done, waiting for installs..." }
-        if ($installsDone -and !$tweaksDone) { $status = "Installs done, waiting for tweaks..." }
-        if ($tweaksDone -and $installsDone) { $status = "All tasks complete." }
+        if ($logContent -match "(?i)Applying tweaks") { $status = "Applying tweaks..." }
+        if ($logContent -match "(?i)Installing features") { $status = "Installing features..." }
+        if ($logContent -match "(?i)Installing applications") { $status = "Installing applications..." }
+        if ($allDone) { $status = "Done." }
 
         if ($status -and $status -ne $lastStatus) {
             Write-Host "  [${minutesIn}m] $status" -ForegroundColor DarkGray
             $lastStatus = $status
         }
 
-        # Both done — kill WinUtil
-        if ($tweaksDone -and $installsDone) {
-            Write-Host "  All WinUtil tasks completed — closing WinUtil..." -ForegroundColor Green
+        # All done — kill WinUtil
+        if ($allDone) {
+            Write-Host "  WinUtil tasks completed — closing WinUtil..." -ForegroundColor Green
             Start-Sleep -Seconds 5
             break
         }

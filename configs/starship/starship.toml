@@ -37,7 +37,7 @@ format = "[$symbol]($style)"
 style = "cyan"
 
 [os.symbols]
-Windows = "󰍲"
+Windows = ""
 Arch = ""
 
 [username]

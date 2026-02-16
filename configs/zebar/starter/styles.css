@@ -1,0 +1,162 @@
+/**
+ * Import the Nerdfonts icon font.
+ * Ref https://www.nerdfonts.com/cheat-sheet for a cheatsheet of available Nerdfonts icons.
+ */
+@import 'https://www.nerdfonts.com/assets/css/webfont.css';
+
+:root {
+  --bg: rgba(10, 5, 5, 0.78);
+  --bg-hover: rgba(150, 15, 40, 0.15);
+  --accent: #b01530;
+  --accent-glow: rgba(176, 21, 48, 0.4);
+  --accent-dim: rgba(176, 21, 48, 0.25);
+  --text: rgba(255, 255, 255, 0.92);
+  --text-dim: rgba(255, 255, 255, 0.55);
+  --icon: rgba(176, 21, 48, 0.85);
+  --border: rgba(255, 255, 255, 0.08);
+  --glass-blur: 16px;
+}
+
+i {
+  color: var(--icon);
+  margin-right: 7px;
+}
+
+body {
+  color: var(--text);
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  overflow: hidden;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+#root {
+  background: var(--bg);
+  backdrop-filter: blur(var(--glass-blur)) saturate(1.4);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(1.4);
+  border-bottom: 1px solid var(--accent-dim);
+  box-shadow: 0 2px 20px rgba(176, 21, 48, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.app {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  align-items: center;
+  height: 100%;
+  padding: 4px 1.5vw;
+}
+
+.left,
+.center,
+.right {
+  display: flex;
+  align-items: center;
+}
+
+.center {
+  justify-self: center;
+  color: var(--text-dim);
+  letter-spacing: 0.5px;
+}
+
+.right {
+  justify-self: end;
+}
+
+.logo {
+  color: var(--accent);
+  margin-right: 16px;
+  font-size: 14px;
+  filter: drop-shadow(0 0 6px var(--accent-glow));
+}
+
+.binding-mode,
+.tiling-direction,
+.network,
+.memory,
+.cpu,
+.battery,
+.weather {
+  margin-right: 20px;
+}
+
+.workspaces {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.workspace {
+  background: rgba(255, 255, 255, 0.04);
+  padding: 4px 8px;
+  color: var(--text-dim);
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  backdrop-filter: blur(8px);
+
+  &.displayed {
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--text);
+    border-color: var(--border);
+  }
+
+  &.focused {
+    background: rgba(176, 21, 48, 0.18);
+    color: var(--accent);
+    border-color: var(--accent-dim);
+    box-shadow: 0 0 12px rgba(176, 21, 48, 0.15), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  }
+
+  &:hover {
+    background: var(--bg-hover);
+    color: var(--text);
+    border-color: var(--accent-dim);
+  }
+}
+
+.binding-mode,
+.tiling-direction {
+  background: rgba(176, 21, 48, 0.12);
+  color: var(--text);
+  border-radius: 4px;
+  line-height: 1;
+  padding: 4px 8px;
+  border: 1px solid var(--accent-dim);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.binding-mode:hover,
+.tiling-direction:hover {
+  background: rgba(176, 21, 48, 0.25);
+  box-shadow: 0 0 8px rgba(176, 21, 48, 0.2);
+}
+
+.binding-mode {
+  margin-right: 4px;
+}
+
+.cpu .high-usage {
+  color: #cc1a35;
+  text-shadow: 0 0 8px rgba(200, 25, 50, 0.6);
+}
+
+.battery {
+  position: relative;
+}
+
+.battery .charging-icon {
+  position: absolute;
+  font-size: 7px;
+  left: -8px;
+  top: 3px;
+  color: #4ade80;
+  filter: drop-shadow(0 0 4px rgba(74, 222, 128, 0.5));
+}

@@ -339,7 +339,13 @@ function Install-GlazeWMConfig {
     $zebarDir = "$env:USERPROFILE\.glzr\zebar"
     Get-RepoFile -RepoPath "configs/zebar/settings.json" -Destination "$zebarDir\settings.json"
     Get-RepoFile -RepoPath "configs/zebar/normalize.css" -Destination "$zebarDir\normalize.css"
-    Write-Host "  Deployed Zebar configs"
+
+    # Deploy starter bar configs (the actual bar layout/widgets)
+    $starterDir = "$zebarDir\starter"
+    Get-RepoFile -RepoPath "configs/zebar/starter/with-glazewm.zebar.json" -Destination "$starterDir\with-glazewm.zebar.json"
+    Get-RepoFile -RepoPath "configs/zebar/starter/with-glazewm.html" -Destination "$starterDir\with-glazewm.html"
+    Get-RepoFile -RepoPath "configs/zebar/starter/styles.css" -Destination "$starterDir\styles.css"
+    Write-Host "  Deployed Zebar configs (settings + starter bar)"
 
     $State.glazewm_configured = $true
     Write-Done "GlazeWM & Zebar config"

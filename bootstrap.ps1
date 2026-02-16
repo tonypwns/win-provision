@@ -19,10 +19,7 @@ $NeedsReboot = $false
 # ── State Management ──────────────────────────────────────────────────────────
 
 function Get-ProvisionState {
-    if (Test-Path $StateFile) {
-        return Get-Content $StateFile -Raw | ConvertFrom-Json
-    }
-    return [PSCustomObject]@{
+    $defaults = [ordered]@{
         ctt_applied         = $false
         nerd_font_installed = $false
         starship_configured = $false
@@ -34,6 +31,22 @@ function Get-ProvisionState {
         terminal_configured = $false
         last_run            = $null
     }
+
+    if (Test-Path $StateFile) {
+        $saved = Get-Content $StateFile -Raw | ConvertFrom-Json
+        # Merge: start from defaults, overlay saved values, so new properties are always present
+        $merged = [PSCustomObject]@{}
+        foreach ($key in $defaults.Keys) {
+            $val = $defaults[$key]
+            if ($saved.PSObject.Properties.Name -contains $key) {
+                $val = $saved.$key
+            }
+            $merged | Add-Member -MemberType NoteProperty -Name $key -Value $val
+        }
+        return $merged
+    }
+
+    return [PSCustomObject]$defaults
 }
 
 function Save-ProvisionState {

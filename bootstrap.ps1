@@ -11,7 +11,7 @@
 #>
 
 $ErrorActionPreference = "Stop"
-$RepoBase = "https://raw.githubusercontent.com/tonypwns/win-provision/main"
+$RepoBase = "https://raw.githubusercontent.com/tonypwns/win-provision/dev"
 $StateFile = "$env:USERPROFILE\.provision-state.json"
 $ConfigDir = "$env:USERPROFILE\.config"
 $NeedsReboot = $false

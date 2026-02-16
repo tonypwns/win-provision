@@ -24,6 +24,7 @@ function Get-ProvisionState {
     }
     return [PSCustomObject]@{
         ctt_applied         = $false
+        nerd_font_installed = $false
         starship_configured = $false
         glazewm_configured  = $false
         pwsh_profile        = $false
@@ -183,7 +184,92 @@ function Invoke-CTTWinUtil {
     return $State
 }
 
-# ── Step 2: Starship Config ──────────────────────────────────────────────────
+# ── Step 2: Nerd Font ─────────────────────────────────────────────────────────
+
+function Install-NerdFont {
+    param($State)
+    Write-Step "Nerd Font Installation"
+
+    if ($State.nerd_font_installed) {
+        Write-Skip "Nerd Font"
+        return $State
+    }
+
+    $fontName = "CaskaydiaCove Nerd Font"
+    $fontFamily = "CaskaydiaCove NF"
+
+    # Check if already installed (look for the font file)
+    $installedFonts = @(
+        "$env:LOCALAPPDATA\Microsoft\Windows\Fonts\CaskaydiaCoveNerdFont-Regular.ttf",
+        "$env:SystemRoot\Fonts\CaskaydiaCoveNerdFont-Regular.ttf",
+        "$env:LOCALAPPDATA\Microsoft\Windows\Fonts\CaskaydiaCoveNerdFontMono-Regular.ttf",
+        "$env:SystemRoot\Fonts\CaskaydiaCoveNerdFontMono-Regular.ttf"
+    )
+    $alreadyInstalled = $installedFonts | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+    if ($alreadyInstalled) {
+        Write-Host "  $fontName already installed" -ForegroundColor DarkGray
+        $State.nerd_font_installed = $true
+        Write-Done "Nerd Font (already present)"
+        return $State
+    }
+
+    # Try oh-my-posh font install (comes with a nice font installer)
+    $ompPath = Get-Command oh-my-posh -ErrorAction SilentlyContinue
+    if ($ompPath) {
+        Write-Host "  Installing via oh-my-posh..." -ForegroundColor Yellow
+        & oh-my-posh font install CascadiaCode 2>&1 | Out-Null
+    } else {
+        # Direct download from Nerd Fonts GitHub releases
+        Write-Host "  Downloading $fontName from GitHub..." -ForegroundColor Yellow
+        $releaseUrl = "https://api.github.com/repos/ryanoasis/nerd-fonts/releases/latest"
+        try {
+            $release = Invoke-RestMethod -Uri $releaseUrl -Headers @{ "User-Agent" = "win-provision" }
+            $asset = $release.assets | Where-Object { $_.name -eq "CascadiaCode.zip" } | Select-Object -First 1
+
+            if (!$asset) {
+                Write-Host "  [WARN] Could not find CascadiaCode.zip in latest release" -ForegroundColor Yellow
+                return $State
+            }
+
+            $zipPath = "$env:TEMP\CascadiaCode-NerdFont.zip"
+            $extractPath = "$env:TEMP\CascadiaCode-NerdFont"
+            Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath -UseBasicParsing
+            Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
+
+            # Install fonts to user fonts directory
+            $userFontsDir = "$env:LOCALAPPDATA\Microsoft\Windows\Fonts"
+            if (!(Test-Path $userFontsDir)) { New-Item -ItemType Directory -Path $userFontsDir -Force | Out-Null }
+
+            $fontFiles = Get-ChildItem "$extractPath\*.ttf" -ErrorAction SilentlyContinue
+            $installed = 0
+            foreach ($font in $fontFiles) {
+                $dest = Join-Path $userFontsDir $font.Name
+                Copy-Item $font.FullName $dest -Force
+
+                # Register font in registry (user scope)
+                $regPath = "HKCU:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts"
+                $fontTitle = [System.IO.Path]::GetFileNameWithoutExtension($font.Name) + " (TrueType)"
+                New-ItemProperty -Path $regPath -Name $fontTitle -Value $dest -PropertyType String -Force | Out-Null
+                $installed++
+            }
+            Write-Host "  Installed $installed font files to $userFontsDir" -ForegroundColor DarkGray
+
+            # Cleanup
+            Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
+            Remove-Item $extractPath -Recurse -Force -ErrorAction SilentlyContinue
+        } catch {
+            Write-Host "  [WARN] Font download failed: $_" -ForegroundColor Yellow
+            return $State
+        }
+    }
+
+    $State.nerd_font_installed = $true
+    Write-Done "Nerd Font ($fontName)"
+    return $State
+}
+
+# ── Step 3: Starship Config ──────────────────────────────────────────────────
 
 function Find-Starship {
     # Try Get-Command first (works if already in PATH)
@@ -306,7 +392,7 @@ function Install-StarshipConfig {
     return $State
 }
 
-# ── Step 3: GlazeWM & Zebar Config ──────────────────────────────────────────
+# ── Step 4: GlazeWM & Zebar Config ──────────────────────────────────────────
 
 function Install-GlazeWMConfig {
     param($State)
@@ -352,7 +438,7 @@ function Install-GlazeWMConfig {
     return $State
 }
 
-# ── Step 4: Windows Terminal Config ──────────────────────────────────────────
+# ── Step 5: Windows Terminal Config ──────────────────────────────────────────
 
 function Install-TerminalConfig {
     param($State)
@@ -379,7 +465,7 @@ function Install-TerminalConfig {
     return $State
 }
 
-# ── Step 5: PowerShell Profile ───────────────────────────────────────────────
+# ── Step 6: PowerShell Profile ───────────────────────────────────────────────
 
 function Install-PwshProfile {
     param($State)
@@ -441,7 +527,7 @@ if (Get-Service ssh-agent -ErrorAction SilentlyContinue | Where-Object Status -e
     return $State
 }
 
-# ── Step 6: OpenSSH Server ───────────────────────────────────────────────────
+# ── Step 7: OpenSSH Server ───────────────────────────────────────────────────
 
 function Install-SSHServer {
     param($State)
@@ -487,7 +573,7 @@ function Install-SSHServer {
     return $State
 }
 
-# ── Step 7: Git Config ───────────────────────────────────────────────────────
+# ── Step 8: Git Config ───────────────────────────────────────────────────────
 
 function Install-GitConfig {
     param($State)
@@ -545,7 +631,7 @@ function Install-GitConfig {
     return $State
 }
 
-# ── Step 8: VirtIO Guest Tools (VM only) ─────────────────────────────────────
+# ── Step 9: VirtIO Guest Tools (VM only) ─────────────────────────────────────
 
 function Install-VirtIO {
     param($State)
@@ -612,6 +698,9 @@ function Invoke-Provision {
     }
 
     $state = Invoke-CTTWinUtil -State $state
+    Save-ProvisionState -State $state
+
+    $state = Install-NerdFont -State $state
     Save-ProvisionState -State $state
 
     $state = Install-StarshipConfig -State $state

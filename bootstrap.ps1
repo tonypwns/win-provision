@@ -141,8 +141,31 @@ function Invoke-CTTWinUtil {
         Start-Sleep -Seconds 10
 
         $elapsed = (Get-Date) - $startTime
+        $minutesIn = [math]::Floor($elapsed.TotalMinutes)
+
         if ($elapsed.TotalMinutes -gt $maxWaitMinutes) {
             Write-Host "  [WARN] WinUtil exceeded ${maxWaitMinutes}m timeout" -ForegroundColor Yellow
+            break
+        }
+
+        # Check if WinUtil is still running (every iteration)
+        $winutilAlive = $false
+        $winutilProcs = Get-Process -ErrorAction SilentlyContinue | Where-Object {
+            $_.MainWindowTitle -match "(?i)WinUtil|Chris Titus" -or
+            $_.MainWindowTitle -match "(?i)win.*util"
+        }
+        if ($winutilProcs) {
+            $winutilAlive = $true
+        } else {
+            # Also check powershell/pwsh processes with WinUtil-like titles
+            $winutilProcs = Get-Process -Name powershell, pwsh -ErrorAction SilentlyContinue |
+                Where-Object { $_.MainWindowTitle -match "(?i)WinUtil|Chris Titus" }
+            if ($winutilProcs) { $winutilAlive = $true }
+        }
+
+        # If WinUtil is gone and we've been running at least 1 minute, it was closed
+        if (!$winutilAlive -and $elapsed.TotalMinutes -gt 1) {
+            Write-Host "  WinUtil process exited — continuing with provisioning..." -ForegroundColor Yellow
             break
         }
 
@@ -155,37 +178,33 @@ function Invoke-CTTWinUtil {
         }
 
         if (!$logFile) {
-            # Check if WinUtil process is even running
-            $winutilProc = Get-Process | Where-Object { $_.MainWindowTitle -match "WinUtil" } | Select-Object -First 1
-            if (!$winutilProc) {
-                # Also check for powershell processes that might be WinUtil
-                $psProcs = Get-Process -Name powershell, pwsh -ErrorAction SilentlyContinue |
-                    Where-Object { $_.MainWindowTitle -match "WinUtil" }
-                if (!$psProcs) {
-                    $minutesIn = [math]::Floor($elapsed.TotalMinutes)
-                    if ($minutesIn -gt 2) {
-                        Write-Host "  [WARN] No WinUtil process found and no log file — it may have closed" -ForegroundColor Yellow
-                        break
-                    }
-                }
+            if ($minutesIn % 1 -eq 0) {
+                Write-Host "  [${minutesIn}m] Waiting for WinUtil log..." -ForegroundColor DarkGray
             }
-            Write-Host "  [$([math]::Floor($elapsed.TotalMinutes))m] Waiting for WinUtil log..." -ForegroundColor DarkGray
             continue
         }
 
         $logContent = Get-Content $logFile.FullName -Raw -ErrorAction SilentlyContinue
         if (!$logContent) { continue }
 
-        # Check for completion signals
-        if ($logContent -match "(?i)(Tweaks finished|Tweaks have been applied|tweaks are finished)") {
+        # Debug: dump unique-ish log lines on first read to help identify completion strings
+        if (!$lastStatus) {
+            $logLines = ($logContent -split "`n") | Where-Object { $_.Trim() } | Select-Object -Last 5
+            foreach ($line in $logLines) {
+                Write-Host "  [log] $($line.Trim())" -ForegroundColor DarkGray
+            }
+        }
+
+        # Check for completion signals — broad matching to catch variations
+        if ($logContent -match "(?i)(tweak.*(finished|complete|applied|done))") {
             if (!$tweaksDone) {
-                Write-Host "  [$([math]::Floor($elapsed.TotalMinutes))m] Tweaks complete." -ForegroundColor Green
+                Write-Host "  [${minutesIn}m] Tweaks complete." -ForegroundColor Green
                 $tweaksDone = $true
             }
         }
-        if ($logContent -match "(?i)(Install Done|Applications installed|install is finished)") {
+        if ($logContent -match "(?i)(install.*(finished|complete|done)|all.*install)") {
             if (!$installsDone) {
-                Write-Host "  [$([math]::Floor($elapsed.TotalMinutes))m] Installs complete." -ForegroundColor Green
+                Write-Host "  [${minutesIn}m] Installs complete." -ForegroundColor Green
                 $installsDone = $true
             }
         }
@@ -193,12 +212,13 @@ function Invoke-CTTWinUtil {
         # Show progress (only if status changed)
         $status = ""
         if ($logContent -match "(?i)(installing\s)") { $status = "Installing apps..." }
-        if ($logContent -match "(?i)(applying tweaks|tweak being)") { $status = "Applying tweaks..." }
+        if ($logContent -match "(?i)(applying tweaks|tweak being|running tweaks)") { $status = "Applying tweaks..." }
         if ($tweaksDone -and !$installsDone) { $status = "Tweaks done, waiting for installs..." }
         if ($installsDone -and !$tweaksDone) { $status = "Installs done, waiting for tweaks..." }
+        if ($tweaksDone -and $installsDone) { $status = "All tasks complete." }
 
         if ($status -and $status -ne $lastStatus) {
-            Write-Host "  [$([math]::Floor($elapsed.TotalMinutes))m] $status" -ForegroundColor DarkGray
+            Write-Host "  [${minutesIn}m] $status" -ForegroundColor DarkGray
             $lastStatus = $status
         }
 
@@ -217,10 +237,10 @@ function Invoke-CTTWinUtil {
         }
     }
 
-    # Kill any WinUtil processes
-    $winutilProcs = Get-Process | Where-Object {
-        $_.MainWindowTitle -match "WinUtil" -or
-        ($_.Name -match "powershell|pwsh" -and $_.MainWindowTitle -match "WinUtil")
+    # Kill any remaining WinUtil processes
+    $winutilProcs = Get-Process -ErrorAction SilentlyContinue | Where-Object {
+        $_.MainWindowTitle -match "(?i)WinUtil|Chris Titus" -or
+        $_.MainWindowTitle -match "(?i)win.*util"
     }
     foreach ($p in $winutilProcs) {
         Write-Host "  Closing WinUtil process $($p.Id)..." -ForegroundColor DarkGray
